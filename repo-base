@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# Manage the local repo/doc cache used as task context.
+set -euo pipefail
+
+REFRESH_LOCKDIR=""
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  repo-base [--pin] [--latest-commit] <github-url>
+  repo-base refresh
+
+Options:
+  --pin             Store under $REPO_BASE/repos instead of $REPO_BASE/tmp.
+  --latest-commit   Skip GitHub release/tag resolution and clone default HEAD.
+
+Environment:
+  REPO_BASE         Cache root. Default: ~/repo-base
+USAGE
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+cleanup_refresh_lock() {
+  if [[ -n "$REFRESH_LOCKDIR" ]]; then
+    rmdir "$REFRESH_LOCKDIR" 2>/dev/null || true
+  fi
+}
+
+repo_base_root() {
+  printf '%s\n' "${REPO_BASE:-$HOME/repo-base}"
+}
+
+print_submodules() {
+  local dir="$1"
+  if [[ ! -f "$dir/.gitmodules" ]]; then
+    echo "submodules: none"
+    return
+  fi
+
+  local paths count submodule_rows
+  submodule_rows=$(git config -f "$dir/.gitmodules" --get-regexp '^submodule\..*\.path$' 2>/dev/null || true)
+  count=$(printf '%s\n' "$submodule_rows" | sed '/^$/d' | wc -l | tr -d ' ')
+  paths=$(printf '%s\n' "$submodule_rows" | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')
+  echo "submodules: DETECTED - not initialized ($count found: $paths)"
+}
+
+resolve_ref() {
+  local owner="$1" repo="$2"
+  local ref
+
+  ref=$(gh release view --repo "$owner/$repo" --json tagName -q .tagName 2>/dev/null || true)
+  if [[ -n "$ref" ]]; then
+    echo "$ref"
+    return
+  fi
+
+  ref=$(gh api "repos/$owner/$repo/tags" --jq '.[0].name' 2>/dev/null || true)
+  if [[ -n "$ref" ]]; then
+    echo "warning: no releases found - using latest tag ($ref)" >&2
+    echo "$ref"
+    return
+  fi
+
+  echo "warning: no releases or tags found - using latest commit" >&2
+  echo ""
+}
+
+refresh_checkout() {
+  local target="$1" ref="$2" force="${3:-false}"
+
+  if [[ "$force" == "true" ]]; then
+    git -C "$target" reset --hard --quiet
+    git -C "$target" clean -fdx --quiet
+  elif [[ -n "$(git -C "$target" status --porcelain 2>/dev/null)" ]]; then
+    echo "warning: $target has local modifications - skipping refresh" >&2
+    return
+  fi
+
+  if [[ -n "$ref" ]]; then
+    git -C "$target" fetch --depth=1 --quiet origin "tag" "$ref" 2>/dev/null ||
+      git -C "$target" fetch --depth=1 --quiet origin "$ref"
+    git -C "$target" -c advice.detachedHead=false checkout --quiet "$ref"
+  else
+    git -C "$target" fetch --depth=1 --quiet
+    git -C "$target" reset --hard origin/HEAD --quiet
+  fi
+}
+
+parse_github_url() {
+  local url="${1%.git}"
+
+  if [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)$ ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+  elif [[ "$url" =~ ^git@github\.com:([^/]+)/([^/]+)$ ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+  else
+    die "unrecognized GitHub URL format: $1"
+  fi
+}
+
+intake_repo() {
+  local pin=false latest_commit=false
+  local owner="" repo="" url ref target root mode_dir sha
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pin)
+        pin=true
+        shift
+        ;;
+      --latest-commit)
+        latest_commit=true
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        usage
+        exit 2
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  [[ $# -eq 1 ]] || { usage; exit 2; }
+  url="$1"
+  parse_github_url "$url"
+
+  root=$(repo_base_root)
+  if $pin; then
+    mode_dir="$root/repos"
+  else
+    mode_dir="$root/tmp"
+  fi
+  target="$mode_dir/$owner/$repo"
+
+  ref=""
+  if ! $latest_commit; then
+    ref=$(resolve_ref "$owner" "$repo")
+  fi
+
+  if [[ -e "$target" ]]; then
+    [[ -d "$target/.git" ]] || die "$target exists but is not a git repository"
+    refresh_checkout "$target" "$ref" "$pin"
+  else
+    mkdir -p "$(dirname "$target")"
+    if [[ -n "$ref" ]]; then
+      git -c advice.detachedHead=false clone --depth 1 --branch "$ref" --quiet "$url" "$target"
+    else
+      git clone --depth 1 --quiet "$url" "$target"
+    fi
+  fi
+
+  sha=$(git -C "$target" rev-parse HEAD)
+  echo ""
+  echo "path:       $target"
+  echo "sha:        $sha"
+  [[ -n "$ref" ]] && echo "ref:        $ref"
+  print_submodules "$target"
+}
+
+valid_doc_path() {
+  local relpath="$1"
+  [[ -n "$relpath" && "$relpath" != /* && "$relpath" != *".."* ]]
+}
+
+refresh_doc() {
+  local root="$1" url="$2" relpath="$3"
+  local dest="$root/$relpath"
+  local dest_dir tmp
+
+  valid_doc_path "$relpath" || {
+    echo "[docs] invalid relative path: $relpath" >&2
+    docs_failed=true
+    return
+  }
+
+  dest_dir=$(dirname "$dest")
+  mkdir -p "$dest_dir"
+  tmp=$(mktemp "$dest_dir/.${relpath##*/}.tmp.XXXXXX")
+
+  if curl --fail --location --silent --show-error -o "$tmp" "$url" && [[ -s "$tmp" ]]; then
+    mv "$tmp" "$dest"
+    echo "[docs] refreshed: $relpath"
+  else
+    rm -f "$tmp"
+    echo "[docs] failed: $relpath (from $url)" >&2
+    docs_failed=true
+  fi
+}
+
+refresh_base() {
+  local root repos_dir manifest lockdir gitdir repo_dir remote_url sha
+  local docs_failed=false
+
+  root=$(repo_base_root)
+  repos_dir="$root/repos"
+  manifest="${DOCS_MANIFEST:-$root/docs.txt}"
+  lockdir="${LOCKDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/repo-base/refresh.lock}"
+
+  mkdir -p "$(dirname "$lockdir")"
+  if ! mkdir "$lockdir" 2>/dev/null; then
+    echo "repo-base refresh already running; exiting"
+    exit 0
+  fi
+  REFRESH_LOCKDIR="$lockdir"
+  trap cleanup_refresh_lock EXIT
+
+  mkdir -p "$repos_dir" "$root/tmp" "$root/docs"
+
+  echo "==> Refreshing git repos in $repos_dir"
+  while IFS= read -r gitdir; do
+    repo_dir="${gitdir%/.git}"
+    remote_url=$(git -C "$repo_dir" remote get-url origin 2>/dev/null || true)
+    if [[ -z "$remote_url" ]]; then
+      echo "[$repo_dir] no origin remote - skipping" >&2
+      continue
+    fi
+
+    git -C "$repo_dir" reset --hard --quiet
+    git -C "$repo_dir" clean -fdx --quiet
+    git -C "$repo_dir" fetch --depth=1 --quiet origin
+    git -C "$repo_dir" reset --hard --quiet FETCH_HEAD
+    git -C "$repo_dir" clean -fdx --quiet
+    sha=$(git -C "$repo_dir" rev-parse HEAD)
+    echo "[$repo_dir] refreshed -> $sha"
+  done < <(find "$repos_dir" -mindepth 3 -maxdepth 3 -name ".git" -type d 2>/dev/null | sort)
+
+  echo "==> Refreshing flat docs from $manifest"
+  if [[ -f "$manifest" ]]; then
+    while IFS=$'\t' read -r url relpath extra; do
+      [[ "$url" =~ ^#.*$ || -z "$url" ]] && continue
+      if [[ -z "${relpath:-}" || -n "${extra:-}" ]]; then
+        echo "[docs] invalid manifest row: $url ${relpath:-} ${extra:-}" >&2
+        docs_failed=true
+        continue
+      fi
+      refresh_doc "$root" "$url" "$relpath"
+    done < "$manifest"
+  else
+    echo "[docs] manifest not found: $manifest"
+  fi
+
+  if $docs_failed; then
+    exit 1
+  fi
+}
+
+main() {
+  if [[ $# -eq 0 ]]; then
+    usage
+    exit 2
+  fi
+
+  case "$1" in
+    refresh)
+      shift
+      [[ $# -eq 0 ]] || { usage; exit 2; }
+      refresh_base
+      ;;
+    -h|--help|help)
+      usage
+      ;;
+    *)
+      intake_repo "$@"
+      ;;
+  esac
+}
+
+main "$@"
