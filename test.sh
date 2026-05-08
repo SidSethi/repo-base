@@ -156,6 +156,20 @@ assert_not_file "$workdir/home/repo-base/repos/acme/sample/LOCAL.md" "refresh di
 assert_file "$workdir/home/repo-base/docs/source.md" "refresh downloads flat docs"
 assert_not_file "$workdir/home/repo-base/tmp/acme/sample/THIRD.md" "refresh ignores temporary checkouts"
 
+output="$(
+  HOME="$workdir/home" \
+    GIT_CONFIG_GLOBAL="$workdir/gitconfig" \
+    REPO_BASE="$workdir/home/repo-base" \
+    "$SCRIPT" ls
+)"
+assert_contains "$output" "Pinned repos" "ls prints pinned repos section"
+assert_contains "$output" "acme/sample" "ls includes pinned repo"
+assert_contains "$output" "Pinned docs" "ls prints pinned docs section"
+assert_contains "$output" "DOCUMENT" "ls prints pinned docs header"
+assert_contains "$output" "REFRESHED" "ls prints pinned docs refresh date header"
+assert_contains "$output" "docs/source.md" "ls includes refreshed pinned doc"
+assert_contains "$output" "Tmp checkouts: 2" "ls prints temporary checkout count"
+
 "$ROOT/install.sh" --bin-dir "$workdir/install-bin" --repo-dir "$ROOT" >/dev/null
 assert_file "$workdir/install-bin/repo-base" "install writes repo-base wrapper"
 if "$workdir/install-bin/repo-base" not-a-github-url >"$workdir/install.out" 2>"$workdir/install.err"; then

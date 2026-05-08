@@ -9,6 +9,7 @@ usage() {
 Usage:
   repo-base [--pin] [--latest-commit] <github-url>
   repo-base refresh
+  repo-base ls
 
 Options:
   --pin             Store under $REPO_BASE/repos instead of $REPO_BASE/tmp.
@@ -174,6 +175,14 @@ valid_doc_path() {
   [[ -n "$relpath" && "$relpath" != /* && "$relpath" != *".."* ]]
 }
 
+format_file_mtime() {
+  local path="$1"
+
+  stat -f "%Sm" -t "%Y-%m-%d" "$path" 2>/dev/null ||
+    date -r "$path" "+%Y-%m-%d" 2>/dev/null ||
+    echo "unknown"
+}
+
 refresh_doc() {
   local root="$1" url="$2" relpath="$3"
   local dest="$root/$relpath"
@@ -256,6 +265,100 @@ refresh_base() {
   fi
 }
 
+list_base() {
+  local root repos_dir tmp_dir manifest gitdir repo_dir rel_repo
+  local found_repos=false found_docs=false tmp_count=0
+  local url relpath extra status refreshed
+  local doc_width=8 refreshed_width=10
+  local bold="" dim="" blue="" cyan="" green="" red="" reset=""
+
+  root=$(repo_base_root)
+  repos_dir="$root/repos"
+  tmp_dir="$root/tmp"
+  manifest="${DOCS_MANIFEST:-$root/docs.txt}"
+
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    bold=$'\033[1m'
+    dim=$'\033[2m'
+    blue=$'\033[34m'
+    cyan=$'\033[36m'
+    green=$'\033[32m'
+    red=$'\033[31m'
+    reset=$'\033[0m'
+  fi
+
+  if [[ -f "$manifest" ]]; then
+    while IFS=$'\t' read -r url relpath extra; do
+      [[ "$url" =~ ^#.*$ || -z "$url" ]] && continue
+      if [[ -n "${relpath:-}" && ${#relpath} -gt $doc_width ]]; then
+        doc_width=${#relpath}
+      fi
+    done < "$manifest"
+  fi
+
+  echo
+  printf '%sroot:%s %s\n' "$dim" "$reset" "$root"
+  echo
+  printf '%s%sPinned repos%s\n' "$bold" "$blue" "$reset"
+  while IFS= read -r gitdir; do
+    repo_dir="${gitdir%/.git}"
+    rel_repo="${repo_dir#"$repos_dir"/}"
+    printf '  %s%s%s\n' "$cyan" "$rel_repo" "$reset"
+    found_repos=true
+  done < <(find "$repos_dir" -mindepth 3 -maxdepth 3 -name ".git" -type d 2>/dev/null | sort)
+  if ! $found_repos; then
+    echo "  (none)"
+  fi
+
+  echo
+  printf '%s%sPinned docs%s\n' "$bold" "$blue" "$reset"
+  if [[ -f "$manifest" ]]; then
+    while IFS=$'\t' read -r url relpath extra; do
+      [[ "$url" =~ ^#.*$ || -z "$url" ]] && continue
+      if [[ -z "${relpath:-}" || -n "${extra:-}" ]] || ! valid_doc_path "$relpath"; then
+        printf '  %sinvalid%s  %s %s %s\n' "$red" "$reset" "$url" "${relpath:-}" "${extra:-}"
+        found_docs=true
+        continue
+      fi
+
+      if [[ -f "$root/$relpath" ]]; then
+        status="present"
+      else
+        status="missing"
+      fi
+      if ! $found_docs; then
+        printf '  %s%-*s  %-*s  %s%s\n' \
+          "$dim" "$doc_width" "DOCUMENT" "$refreshed_width" "REFRESHED" "SOURCE" "$reset"
+      fi
+      if [[ "$status" == "present" ]]; then
+        refreshed=$(format_file_mtime "$root/$relpath")
+        printf '  %-*s  %s%-*s%s  %s%s%s\n' \
+          "$doc_width" "$relpath" \
+          "$green" "$refreshed_width" "$refreshed" "$reset" \
+          "$dim" "$url" "$reset"
+      else
+        refreshed="-"
+        printf '  %-*s  %s%-*s%s  %s%s%s  %s⚠ missing%s\n' \
+          "$doc_width" "$relpath" \
+          "$red" "$refreshed_width" "$refreshed" "$reset" \
+          "$dim" "$url" "$reset" \
+          "$red" "$reset"
+      fi
+      found_docs=true
+    done < "$manifest"
+  fi
+  if ! $found_docs; then
+    echo "  (none)"
+  fi
+
+  if [[ -d "$tmp_dir" ]]; then
+    tmp_count=$(find "$tmp_dir" -mindepth 3 -maxdepth 3 -name ".git" -type d 2>/dev/null | wc -l | tr -d ' ')
+  fi
+  echo
+  printf '%sTmp checkouts:%s %s\n' "$bold" "$reset" "$tmp_count"
+  echo
+}
+
 main() {
   if [[ $# -eq 0 ]]; then
     usage
@@ -267,6 +370,11 @@ main() {
       shift
       [[ $# -eq 0 ]] || { usage; exit 2; }
       refresh_base
+      ;;
+    ls|list)
+      shift
+      [[ $# -eq 0 ]] || { usage; exit 2; }
+      list_base
       ;;
     -h|--help|help)
       usage

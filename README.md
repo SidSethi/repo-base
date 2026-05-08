@@ -3,6 +3,8 @@
 `repo-base` keeps local repository and documentation context in one predictable
 place for human and AI-assisted work.
 
+It addresses the increasingly common loop of asking an agent to inspect a public repo or doc. Keeping that source nearby avoids repeated network fetches, optimizes token usage, and leaves a real checkout available for direct human inspection.
+
 It has two jobs:
 
 - Turn a GitHub URL into a local checkout with a printed path and commit SHA.
@@ -22,9 +24,7 @@ Default root:
 
 Set `REPO_BASE=/path/to/base` to use a different root.
 
-The `repos` and `tmp` split is intentional. Durable repos are cache entries and
-can be reset during refresh. Temporary checkouts may contain task-local edits, so
-they are skipped when dirty.
+The `repos` and `tmp` split is intentional. Durable repos are cache entries and can be reset during refresh. Temporary checkouts may contain task-local edits, so they are skipped when dirty.
 
 ## Usage
 
@@ -44,6 +44,12 @@ Refresh durable repos and flat docs:
 
 ```sh
 repo-base refresh
+```
+
+List pinned repos, pinned docs, and the temporary checkout count:
+
+```sh
+repo-base ls
 ```
 
 Output from a checkout is prompt-friendly:
@@ -69,8 +75,7 @@ Use `--latest-commit` to skip release and tag lookup.
 
 ## Flat Docs
 
-`repo-base refresh` reads `$REPO_BASE/docs.txt` when present. Each non-comment
-row is:
+`repo-base refresh` reads `$REPO_BASE/docs.txt` when present. Each non-comment row is:
 
 ```text
 https://example.com/llms-full.txt	docs/example-llms-full.txt
@@ -92,8 +97,7 @@ For dotfiles-managed wrappers:
 ./install.sh --bin-dir ~/.dotfiles/bin --repo-dir '$HOME/code/repo-base'
 ```
 
-The installer writes only a small operational wrapper. Implementation,
-documentation, and tests stay in this repo.
+The installer writes only a small operational wrapper. Implementation, documentation, and tests stay in this repo.
 
 ## Development
 
@@ -102,3 +106,4 @@ documentation, and tests stay in this repo.
 shellcheck repo-base install.sh test.sh
 bash -n repo-base install.sh test.sh
 ```
+
